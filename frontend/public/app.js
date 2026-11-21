@@ -248,8 +248,9 @@ function renderStatus(s) {
   state.connected = s.connected;
   state.simulated = s.simulated;
   const badge = $("conn-badge");
-  badge.textContent = s.connected ? `Connected · ${s.name || s.address}` : "Disconnected";
-  badge.className = "badge " + (s.connected ? "badge-on" : "badge-off");
+  badge.textContent = s.connected ? `Connected · ${s.name || s.address}`
+    : s.reconnecting ? "Reconnecting..." : "Disconnected";
+  badge.className = "badge " + (s.connected ? "badge-on" : s.reconnecting ? "badge-sim" : "badge-off");
   $("sim-badge").hidden = !s.simulated;
   $("disconnect-btn").disabled = !s.connected;
   $("alarm-toggle").disabled = !s.connected;

@@ -21,6 +21,9 @@ COMMAND_INTERVAL_S = 0.2   # spacing between GATT writes (DittelHome uses 0.2 s)
 RESPONSE_TIMEOUT_S = 1.5
 POLL_PERIOD_S = 1.0        # one full telemetry cycle per second
 BIND_TIMEOUT_S = 10.0
+KEEPALIVE_PERIOD_S = 5.0     # extra AF02 ping on top of the 1 s telemetry poll
+STALL_TIMEOUT_S = 10.0       # no data for this long -> treat the link as dead
+RECONNECT_MAX_DELAY_S = 15.0
 
 
 def _config_dir() -> Path:
@@ -83,10 +86,12 @@ class ChargerBase:
         self.bound: Optional[bool] = None
         self.latest: dict[str, Any] = {}
         self.last_job: Optional[dict] = None
+        self.reconnecting = False
 
     def state(self) -> dict:
         return {
             "connected": self.connected,
+            "reconnecting": self.reconnecting,
             "address": self.address,
             "name": self.name,
             "hw_info": self.hw_info,
@@ -121,6 +126,11 @@ class BleCharger(ChargerBase):
         self._ir_supported: Optional[bool] = None
         self._write_response: dict[str, bool] = {}  # char uuid -> use write-with-response
         self._rx_count = 0
+        self._last_rx = time.monotonic()
+        self._last_keepalive = time.monotonic()
+        self._want_connected = False
+        self._supervisor: Optional[asyncio.Task] = None
+        self._link_lost = asyncio.Event()
 
     async def scan(self, timeout: float = 5.0) -> list[dict]:
         from bleak import BleakScanner
@@ -145,6 +155,7 @@ class BleCharger(ChargerBase):
     def _on_notify(self, _char, data: bytearray) -> None:
         b = bytes(data)
         self._rx_count += 1
+        self._last_rx = time.monotonic()
         self.bus.publish("rx", b.hex(" "))
         parsed = p.parse_any(b)
         if parsed is None:
@@ -198,8 +209,9 @@ class BleCharger(ChargerBase):
             self.bus.publish("log", f"ISDT service not found. Device GATT table: {listing}")
 
     async def _request(self, char_uuid: str, data: bytes, expect: str,
-                       timeout: float = RESPONSE_TIMEOUT_S) -> Optional[dict]:
+                       timeout: Optional[float] = None) -> Optional[dict]:
         """Send one command and wait for its reply. One command in flight at a time."""
+        timeout = RESPONSE_TIMEOUT_S if timeout is None else timeout
         async with self._io_lock:
             fut = asyncio.get_running_loop().create_future()
             self._waiters[expect] = fut
@@ -213,14 +225,27 @@ class BleCharger(ChargerBase):
                 await asyncio.sleep(COMMAND_INTERVAL_S)
 
     async def connect(self, address: str) -> None:
+        """User-initiated connect. Keeps the link up until disconnect() is called."""
+        await self.disconnect()
+        self._want_connected = True
+        self.address = address
+        try:
+            await self._open(address)
+        except Exception:
+            self._want_connected = False
+            await self._teardown()
+            raise
+        if self._supervisor is None or self._supervisor.done():
+            self._supervisor = asyncio.create_task(self._supervise())
+
+    async def _open(self, address: str) -> None:
+        """Connect, subscribe, bind and start telemetry (used for connect and reconnect)."""
         from bleak import BleakClient
 
-        await self.disconnect()
         self.bus.publish("log", f"Connecting to {address}...")
         client = BleakClient(address, timeout=15.0, disconnected_callback=self._on_disconnect)
         await client.connect()
         self._client = client
-        self.address = address
         self.name = getattr(client, "name", None) or address
 
         # BlueZ needs an explicit MTU exchange or long telemetry frames get cut off.
@@ -259,15 +284,50 @@ class BleCharger(ChargerBase):
                 "power-cycle the charger, then reconnect. Tick 'Show raw packets' and send the log.",
             )
 
+        self._last_rx = time.monotonic()
+        self._last_keepalive = time.monotonic()
         self.connected = True
+        self.reconnecting = False
         self._status()
         self.bus.publish("log", f"Connected. HW {self.hw_info}")
         self._poll_task = asyncio.create_task(self._poll_loop())
 
-    def _on_disconnect(self, _client) -> None:
-        if self.connected:
-            self.connected = False
-            self.bus.publish("log", "Charger disconnected.")
+    def _on_disconnect(self, client) -> None:
+        if client is not self._client:
+            return  # an old link we already tore down on purpose
+        was = self.connected
+        self.connected = False
+        if was:
+            silent = time.monotonic() - self._last_rx
+            self.bus.publish("log", f"Charger disconnected (last data {silent:.1f} s earlier)."
+                             + (" Reconnecting..." if self._want_connected else ""))
+            self._status()
+        self._link_lost.set()
+
+    async def _supervise(self) -> None:
+        """Reconnect automatically whenever the link drops without the user asking."""
+        while self._want_connected:
+            await self._link_lost.wait()
+            self._link_lost.clear()
+            if not self._want_connected:
+                break
+            await self._teardown()
+            delay = 1.0
+            attempt = 0
+            while self._want_connected and not self.connected:
+                attempt += 1
+                self.reconnecting = True
+                self._status()
+                try:
+                    await self._open(self.address)
+                    self.bus.publish("log", f"Reconnected (attempt {attempt}).")
+                except Exception as e:  # noqa: BLE001
+                    self.bus.publish("log", f"Reconnect attempt {attempt} failed: {e}. "
+                                            f"Retrying in {delay:.0f} s.")
+                    await self._teardown()
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, RECONNECT_MAX_DELAY_S)
+            self.reconnecting = False
             self._status()
 
     async def _poll_loop(self) -> None:
@@ -284,6 +344,21 @@ class BleCharger(ChargerBase):
                 misses = 0 if (e or w) else misses + 1
                 if misses == 8:
                     self.bus.publish("log", "Charger stopped answering telemetry requests.")
+
+                # Keepalive on the control channel, so the charger always sees this
+                # client as active even if it only counts AF02 traffic.
+                if time.monotonic() - self._last_keepalive >= KEEPALIVE_PERIOD_S:
+                    self._last_keepalive = time.monotonic()
+                    await self._request(p.AF02_UUID, p.hw_info_req(), "hw_info", 1.0)
+
+                # Watchdog: a link that is "up" but silent is dead. Force a reconnect.
+                silent = time.monotonic() - self._last_rx
+                if silent > STALL_TIMEOUT_S and self._want_connected:
+                    self.bus.publish("log", f"No data from charger for {silent:.0f} s. Reconnecting.")
+                    self.connected = False
+                    self._status()
+                    self._link_lost.set()
+                    break
             except Exception as ex:  # noqa: BLE001
                 if not self.connected or not (self._client and self._client.is_connected):
                     break
@@ -291,17 +366,29 @@ class BleCharger(ChargerBase):
                 await asyncio.sleep(2.0)
             await asyncio.sleep(max(0.0, POLL_PERIOD_S - (time.monotonic() - start)))
 
-    async def disconnect(self) -> None:
+    async def _teardown(self) -> None:
+        """Drop the current BLE link and polling, without changing what the user wants."""
         self.connected = False
-        if self._poll_task:
-            self._poll_task.cancel()
-            self._poll_task = None
-        if self._client is not None:
+        task, self._poll_task = self._poll_task, None
+        if task and task is not asyncio.current_task():
+            task.cancel()
+        client, self._client = self._client, None
+        if client is not None:
             try:
-                await self._client.disconnect()
+                await client.disconnect()
             except Exception:  # noqa: BLE001
                 pass
-            self._client = None
+
+    async def disconnect(self) -> None:
+        """User-initiated disconnect: stop reconnecting and drop the link."""
+        self._want_connected = False
+        self.reconnecting = False
+        self._link_lost.set()  # wake the supervisor so it exits
+        sup, self._supervisor = self._supervisor, None
+        if sup and not sup.done():
+            sup.cancel()
+        await self._teardown()
+        self._link_lost.clear()
         self._status()
 
     def _require(self) -> None:

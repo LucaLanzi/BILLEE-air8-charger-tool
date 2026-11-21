@@ -100,3 +100,79 @@ def test_silent_charger_warns(monkeypatch, fast):
     ch, _, logs = run_connect(monkeypatch, ["write", "notify"], respond=False)
     assert ch.bound is None
     assert any("has not sent ANY data" in l for l in logs)
+
+
+def test_auto_reconnect_after_drop(monkeypatch, fast):
+    """A link that drops on its own is re-established; a user disconnect is not."""
+    clients = []
+    FakeClient, writes = make_fake_client(["write", "notify"], respond=True)
+
+    class Tracking(FakeClient):
+        def __init__(self, *a, disconnected_callback=None, **k):
+            super().__init__(*a, **k)
+            self._dc = disconnected_callback
+            clients.append(self)
+
+        async def disconnect(self):
+            was = self.is_connected
+            await super().disconnect()
+            if was and self._dc:
+                self._dc(self)
+
+    monkeypatch.setitem(sys.modules, "bleak", types.SimpleNamespace(BleakClient=Tracking))
+    ch = device.BleCharger(device.EventBus())
+
+    async def go():
+        await ch.connect("AA")
+        assert ch.connected and len(clients) == 1
+        # charger drops the link
+        clients[0].is_connected = False
+        ch._on_disconnect(clients[0])
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if ch.connected and len(clients) == 2:
+                break
+        assert ch.connected and len(clients) == 2 and ch._client is clients[1]
+        # user disconnect: no further reconnects
+        await ch.disconnect()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert not ch.connected and len(clients) == 2
+
+    asyncio.run(go())
+
+
+def test_stall_watchdog_triggers_reconnect(monkeypatch, fast):
+    monkeypatch.setattr(device, "STALL_TIMEOUT_S", -1)  # any silence counts as a stall
+    monkeypatch.setattr(device, "POLL_PERIOD_S", 0)
+    monkeypatch.setattr(device, "RESPONSE_TIMEOUT_S", 0.01)
+    FakeClient, _ = make_fake_client(["write", "notify"], respond=True)
+    made = []
+
+    class Counting(FakeClient):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            made.append(self)
+
+    monkeypatch.setitem(sys.modules, "bleak", types.SimpleNamespace(BleakClient=Counting))
+    bus = device.EventBus()
+    q = bus.subscribe()
+    ch = device.BleCharger(bus)
+
+    async def go():
+        await ch.connect("AA")
+        import time
+        deadline = time.monotonic() + 3
+        while len(made) < 2 and time.monotonic() < deadline:
+            await asyncio.sleep(0)
+        await ch.disconnect()
+        logs = []
+        while not q.empty():
+            m = q.get_nowait()
+            if m["type"] == "log":
+                logs.append(m["data"])
+        return logs
+
+    logs = asyncio.run(go())
+    assert len(made) >= 2
+    assert any("Reconnecting" in l for l in logs)

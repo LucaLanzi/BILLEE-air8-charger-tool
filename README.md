@@ -125,7 +125,12 @@ Run the tests with `make test`.
   charger and scan again. On Linux, check that `bluetoothctl show` lists a powered controller.
 - **"Bound: no reply":** normal on some firmware. Telemetry still works.
 - **Cell voltages missing:** connect the balance lead.
-- **Telemetry stops:** the backend logs "Charger stopped answering". Disconnect and reconnect.
+- **Connection drops:** the tool keeps the link alive by itself. It polls telemetry
+  every second and sends an extra keepalive every 5 s. If the charger disconnects,
+  or sends nothing for 10 s, the tool reconnects automatically. The badge shows
+  "Reconnecting..." and it retries with backoff up to every 15 s. It stops only
+  when you press **Disconnect**. Each drop is logged with how long the charger
+  had been silent, so send that log if it keeps happening.
 - **The job was accepted but the charger does something different:** stop it by
   unplugging, then file an issue with the **Show raw packets** log. That's how the Air8
   protocol gets verified.
