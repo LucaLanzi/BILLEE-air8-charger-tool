@@ -134,3 +134,39 @@ def test_api_sim_flow():
         assert c.post("/api/raw", json={"hex": "12 e4 00"}).status_code == 403
         with c.websocket_connect("/ws") as ws:
             assert ws.receive_json()["type"] == "status"
+
+
+# ---- stop ------------------------------------------------------------------
+from air8_backend import stop as stop_mod
+
+
+def test_parse_stop_hex():
+    assert stop_mod.parse_stop_hex("13 ab 00") == ("af01", bytes([0x13, 0xAB, 0]))
+    assert stop_mod.parse_stop_hex("AF02: 12,34") == ("af02", bytes([0x12, 0x34]))
+    assert stop_mod.parse_stop_hex("  ") is None
+    with pytest.raises(ValueError):
+        stop_mod.parse_stop_hex("af03: 12")
+
+
+def test_soft_stop_task_uses_connected_pack():
+    t = stop_mod.soft_stop_task(p.BATTERY_TYPES["LiFe"], 4)
+    assert (t.task_type, t.battery_type, t.cells) == (0, 3, 4)
+    assert t.current_ma == 100 and t.capacity_limit_mah == 1 and t.cutoff_mv == 3300
+    t = stop_mod.soft_stop_task(None, None)  # unknown pack -> LiPo, auto cells
+    assert t.battery_type == 1 and t.cells == 0 and t.cutoff_mv == 3850
+
+
+def test_api_stop_sim(monkeypatch):
+    monkeypatch.setattr(stop_mod, "CONFIRM_TIMEOUT_S", 4.0)
+    with TestClient(create_app(simulate=True)) as c:
+        assert c.post("/api/stop").status_code == 409
+        c.post("/api/connect", json={"address": "SIM"})
+        c.post("/api/job/start", json=dict(task="charge", chemistry="LiPo", cells=6, current_ma=5000))
+        r = c.post("/api/stop").json()
+        assert r["method"] == "soft" and r["confirmed"]
+    with TestClient(create_app(simulate=True, stop_hex="13 ab 00")) as c:
+        assert c.get("/api/health").json()["stop_method"] == "captured"
+        c.post("/api/connect", json={"address": "SIM"})
+        c.post("/api/job/start", json=dict(task="charge", chemistry="LiPo", cells=6, current_ma=5000))
+        r = c.post("/api/stop").json()
+        assert r["method"] == "captured" and r["confirmed"]

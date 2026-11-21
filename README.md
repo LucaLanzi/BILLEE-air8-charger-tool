@@ -18,13 +18,12 @@ Browser ──HTTP/WS──▶ Node front end (:3000) ──proxy──▶ Pytho
 
 ## ⚠️ Read before charging
 
-- **No remote stop.** No Bluetooth "stop" command for the Air8 is known. To stop a
-  job, **unplug the battery** (main lead first, then the balance lead) or switch
-  off the charger's power supply.
-- **Job start is experimental on the Air8.** The 0xEA start-job command is
-  documented for the Air8, but the community projects only confirmed it on other
-  ISDT models. For your first test, use a small LiPo at a low current (≈1 A) and
-  stay next to it. Check that the charger's own screen shows the settings you sent.
+- **Stop is a workaround.** ISDT's own Bluetooth stop command hasn't been
+  captured yet (see [Stopping a job](#stopping-a-job)). The **Stop job** button
+  replaces the running job with one that ends almost at once. It then watches the
+  current and tells you whether the stop worked. If it says "not confirmed",
+  **unplug the battery** (main lead first, then the balance lead).
+- Job start (the 0xEA command) has been confirmed working on our Air8 from macOS.
 - The backend refuses unsafe settings (over-voltage cut-offs, too many cells, over
   20 A, storage mode on NiMH/Pb, and so on). The charger also enforces its own limits.
 - Never charge unattended, and charge LiPos in a fire-safe bag or box.
@@ -43,31 +42,25 @@ Browser ──HTTP/WS──▶ Node front end (:3000) ──proxy──▶ Pytho
 ## Quick start
 
 ```bash
-cd BILLEE-air8-charger-tool/frontend
-npm install
-```
-
-```bash
-npm start          # real charger
+cd BILLEE-air8-charger-tool
+make setup      # checks uv + Node, installs the Python venv and npm packages
+make start      # real charger
 ```
 
 Open <http://localhost:3000>, click **Scan**, then **Connect**.
 
-To try the UI without hardware:
+| Command | What it does |
+|---|---|
+| `make` / `make help` | List targets |
+| `make setup` | Install everything |
+| `make start` | Backend + UI for the real charger |
+| `make sim` | Same, with a simulated charger (no hardware) |
+| `make test` | Backend test suite |
+| `make backend` / `make frontend` | Run one half on its own |
+| `make clean` | Remove `backend/.venv` and `frontend/node_modules` |
 
-```bash
-npm run sim
-```
-
-Run the parts separately (for example the backend on another machine):
-
-```bash
-cd backend && uv run air8-backend                # --sim, --port 8765, --host 127.0.0.1
-```
-
-```bash
-cd frontend && BACKEND_URL=http://127.0.0.1:8765 npm run frontend
-```
+Pass backend options with `ARGS`, e.g. `make start ARGS="--allow-raw"`. Without
+`make` (e.g. on Windows): `cd frontend && npm install && npm start`.
 
 Both servers listen on `127.0.0.1` only, because anyone who can reach the API can
 start a charge. Use `--host 0.0.0.0` (backend) or `HOST=0.0.0.0` (front end) only
@@ -99,6 +92,7 @@ backend/                     Python (FastAPI + bleak)
     protocol.py              packet builders/parsers (pure, unit-tested)
     limits.py                per-chemistry limits + job validation
     device.py                BLE connection, polling, simulator
+    stop.py                  soft stop + captured stop command
     server.py                REST + WebSocket API, CLI entry point
   tests/                     pytest suite (protocol, limits, API via simulator)
 frontend/                    Node (Express)
@@ -107,7 +101,7 @@ frontend/                    Node (Express)
   public/                    UI (vanilla JS, no build step)
 ```
 
-Run the tests with `cd backend && uv run pytest`.
+Run the tests with `make test`.
 
 ### API (backend)
 
@@ -120,6 +114,7 @@ Run the tests with `cd backend && uv run pytest`.
 | GET | `/api/limits` | chemistry limits for the UI |
 | POST | `/api/job/validate` | check a job and preview its packet |
 | POST | `/api/job/start` | validate and send a job |
+| POST | `/api/stop` | stop the running job, report whether it's confirmed |
 | POST | `/api/alarm` `{enabled}` | charger beeper on/off |
 | POST | `/api/raw` `{characteristic, hex}` | send raw bytes (only with `--allow-raw`) |
 | WS | `/ws` | live `electric`, `work_state`, `status`, `log`, `rx`/`tx` events |
@@ -135,16 +130,38 @@ Run the tests with `cd backend && uv run pytest`.
   unplugging, then file an issue with the **Show raw packets** log. That's how the Air8
   protocol gets verified.
 
-## Helping finish the protocol (stop command, state names)
+## Stopping a job
 
-1. On an Android phone, turn on **Developer options → Enable Bluetooth HCI snoop log**.
-2. In ISDLink, start a job, then **stop** it from the app.
-3. Pull the log (`adb bugreport`) and open `btsnoop_hci.log` in Wireshark with the
-   filter `btatt`.
-4. Look for writes to handle AF01. The stop command is the write that isn't
-   `12 E4`, `13 E6` or `13 EA`.
-5. Test candidate bytes with `uv run air8-backend --allow-raw` and the raw-send box
-   in the Log panel, then add the command to `protocol.py`.
+**Soft stop (default).** No community project has published ISDT's stop command.
+The Bluetooth protocol also has no known "press a button" command, so the tool
+can't press Home twice for you. Instead, **Stop job** sends a new job that uses
+the start command already proven on the Air8. The new job is a charge of the same
+battery type at 100 mA to the lowest allowed voltage (LiPo 3.85 V/cell) with a
+1 mAh capacity limit. The charger finishes it at once, or within about 36 s at
+worst. The tool then watches the live current and reports whether the stop is
+confirmed.
+
+### Capturing the real stop command
+
+Do this once and the Stop button will send exactly what ISDLink sends:
+
+1. On an Android phone, turn on **Developer options → Enable Bluetooth HCI snoop log**,
+   then toggle Bluetooth off and on.
+2. In ISDLink, start a charge, wait a few seconds, then press **Stop** in the app.
+3. Run `adb bugreport` and open the `btsnoop_hci.log` inside it in Wireshark with the filter
+   `btatt.opcode == 0x52 || btatt.opcode == 0x12` (writes).
+4. Find the write sent right after you pressed Stop. It won't start with `12 E4`,
+   `13 E6` or `13 EA`, which are polling and job start.
+5. Try it with `make start ARGS="--stop-hex '<bytes>'"`. Add `af02: ` in front if it was
+   written to AF02 instead of AF01.
+6. Once it works, save it permanently by putting the bytes in the `stop_command` file in
+   the config folder:
+   - macOS: `~/Library/Application Support/billee-air8/`
+   - Linux: `~/.config/billee-air8/`
+   - Windows: `%APPDATA%\billee-air8\`
+
+   Or set the `AIR8_STOP_HEX` environment variable. Please also add the bytes to
+   `protocol.py` and send a PR to the upstream projects.
 
 ## Credits
 

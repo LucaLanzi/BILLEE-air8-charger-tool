@@ -179,6 +179,24 @@ async function startJob(ev) {
   });
 }
 
+async function stopJob() {
+  const btn = $("stop-btn");
+  btn.disabled = true; btn.textContent = "Stopping...";
+  const box = $("job-messages");
+  try {
+    const r = await api("/api/stop", { method: "POST" });
+    box.replaceChildren(r.confirmed
+      ? el("div", { class: "msg ok", text: "Stopped: the charger is no longer working the pack." })
+      : el("div", { class: "msg err", text: r.ack && !r.ack.ok
+          ? `Charger refused the stop (status ${r.ack.raw_status}). Unplug the battery now.`
+          : "Stop not confirmed. If the current hasn't dropped, unplug the battery now." }));
+  } catch (e) {
+    box.replaceChildren(el("div", { class: "msg err", text: `Stop failed: ${e.message}. Unplug the battery now.` }));
+  } finally {
+    btn.textContent = "■ Stop job"; updateButtons();
+  }
+}
+
 // ---------------------------------------------------------------- presets
 async function loadPresets(list) {
   list = list || (await api("/presets"));
@@ -250,6 +268,7 @@ function renderStatus(s) {
 }
 function updateButtons() {
   $("start-btn").disabled = !(state.connected && state.valid);
+  $("stop-btn").disabled = !state.connected;
 }
 
 // ---------------------------------------------------------------- live data
@@ -443,6 +462,7 @@ async function init() {
     const health = await api("/api/health");
     state.allowRaw = health.allow_raw;
     $("raw-form").hidden = !health.allow_raw;
+    if (health.stop_method === "captured") $("stop-note").textContent = "The Stop button sends the stop command captured from the ISDLink app.";
     state.limits = await api("/api/limits");
   } catch (e) {
     $("job-messages").append(el("div", { class: "msg err", text: `Backend unavailable: ${e.message}` }));
@@ -466,6 +486,7 @@ async function init() {
   $("job-form").addEventListener("submit", startJob);
 
   $("scan-btn").onclick = scan;
+  $("stop-btn").onclick = stopJob;
   $("disconnect-btn").onclick = () => api("/api/disconnect", { method: "POST" }).catch((e) => log(e.message));
   $("alarm-toggle").onchange = (ev) => api("/api/alarm", { method: "POST", body: { enabled: ev.target.checked } }).catch((e) => log(e.message));
   $("log-clear").onclick = () => { $("log").textContent = ""; };

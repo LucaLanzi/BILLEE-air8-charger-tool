@@ -428,4 +428,5 @@ class SimCharger(ChargerBase):
 
     async def send_raw(self, char: str, data: bytes) -> None:
         self.bus.publish("tx", f"[{char}] {data.hex(' ')}")
+        self._job, self._state = None, 0  # the simulator treats any raw command as a stop
 

@@ -14,9 +14,8 @@
 </header>
 
 <div class="notice" role="note">
-  <strong>No remote stop.</strong> No Bluetooth stop command for the Air8 is known yet.
-  To stop a job, unplug the battery (main lead first, then the balance lead) or switch off the charger's power.
-  Don't leave a charge unattended.
+  <strong>Stop is experimental.</strong> <span id="stop-note">The Stop button replaces the running job with a 1&nbsp;mAh job that ends almost immediately.</span>
+  If the current doesn't drop, unplug the battery (main lead first, then the balance lead). Don't leave a charge unattended.
 </div>
 
 <main class="grid">
@@ -98,7 +97,10 @@
 
   <!-- ============ Live ============ -->
   <section class="card wide" id="live-card">
-    <h2>Live</h2>
+    <div class="live-head">
+      <h2>Live</h2>
+      <button type="button" id="stop-btn" class="danger" disabled>■ Stop job</button>
+    </div>
     <div class="tiles" id="tiles"></div>
 
     <div class="charts">

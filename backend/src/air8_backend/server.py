@@ -17,7 +17,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from . import limits
-from .device import BleCharger, ChargerBase, EventBus, SimCharger
+from .device import BleCharger, ChargerBase, EventBus, SimCharger, _config_dir
+from .stop import load_stop_command, stop_job
 
 
 class ConnectBody(BaseModel):
@@ -43,8 +44,10 @@ class RawBody(BaseModel):
     hex: str
 
 
-def create_app(simulate: bool = False, allow_raw: bool = False) -> FastAPI:
+def create_app(simulate: bool = False, allow_raw: bool = False,
+               stop_hex: Optional[str] = None) -> FastAPI:
     bus = EventBus()
+    stop_cmd = load_stop_command(stop_hex, _config_dir())
     charger: ChargerBase = SimCharger(bus) if simulate else BleCharger(bus)
 
     @asynccontextmanager
@@ -59,7 +62,8 @@ def create_app(simulate: bool = False, allow_raw: bool = False) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"ok": True, "simulated": simulate, "allow_raw": allow_raw}
+        return {"ok": True, "simulated": simulate, "allow_raw": allow_raw,
+                "stop_method": "captured" if stop_cmd else "soft"}
 
     @app.get("/api/limits")
     async def get_limits():
@@ -113,6 +117,17 @@ def create_app(simulate: bool = False, allow_raw: bool = False) -> FastAPI:
                            f"{body.current_ma} mA, cut-off {task.cutoff_mv}")
         return {"warnings": warnings, **result}
 
+    @app.post("/api/stop")
+    async def stop():
+        if not charger.connected:
+            raise HTTPException(409, "Charger is not connected")
+        bus.publish("log", "Stop requested ("
+                    + ("captured stop command" if stop_cmd else "soft stop: replacing job with a 1 mAh job") + ")")
+        result = await stop_job(charger, stop_cmd)
+        bus.publish("log", "Stop confirmed: charger is no longer working the pack." if result["confirmed"]
+                    else "Stop NOT confirmed. Unplug the battery if it is still charging.")
+        return result
+
     @app.post("/api/alarm")
     async def alarm(body: AlarmBody):
         if not charger.connected:
@@ -157,11 +172,13 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind address (default localhost only; anyone who can reach this can start a charge)")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--stop-hex", default=None,
+                    help="captured ISDLink stop command, e.g. '13 xx 00' or 'af02: ...' (default: soft stop)")
     ap.add_argument("--allow-raw", action="store_true",
                     help="enable the raw hex command endpoint (protocol research only)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run(create_app(args.sim, args.allow_raw), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(create_app(args.sim, args.allow_raw, args.stop_hex), host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
