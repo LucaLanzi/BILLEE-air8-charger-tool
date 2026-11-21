@@ -20,7 +20,7 @@ log = logging.getLogger("air8")
 COMMAND_INTERVAL_S = 0.2   # spacing between GATT writes (DittelHome uses 0.2 s)
 RESPONSE_TIMEOUT_S = 1.5
 POLL_PERIOD_S = 1.0        # one full telemetry cycle per second
-BIND_TIMEOUT_S = 5.0
+BIND_TIMEOUT_S = 10.0
 
 
 def _config_dir() -> Path:
@@ -119,6 +119,8 @@ class BleCharger(ChargerBase):
         self._waiters: dict[str, asyncio.Future] = {}
         self._io_lock = asyncio.Lock()
         self._ir_supported: Optional[bool] = None
+        self._write_response: dict[str, bool] = {}  # char uuid -> use write-with-response
+        self._rx_count = 0
 
     async def scan(self, timeout: float = 5.0) -> list[dict]:
         from bleak import BleakScanner
@@ -142,6 +144,7 @@ class BleCharger(ChargerBase):
 
     def _on_notify(self, _char, data: bytearray) -> None:
         b = bytes(data)
+        self._rx_count += 1
         self.bus.publish("rx", b.hex(" "))
         parsed = p.parse_any(b)
         if parsed is None:
@@ -162,7 +165,37 @@ class BleCharger(ChargerBase):
 
     async def _write(self, char_uuid: str, data: bytes) -> None:
         self.bus.publish("tx", data.hex(" "))
-        await self._client.write_gatt_char(char_uuid, data, response=False)
+        await self._client.write_gatt_char(
+            char_uuid, data, response=self._write_response.get(char_uuid, False))
+
+    def _inspect_characteristics(self) -> None:
+        """Pick the write type each characteristic actually supports, and log it.
+
+        Sending write-without-response to a characteristic that only accepts
+        normal writes is silently dropped on macOS, so this must match.
+        """
+        services = self._client.services
+        found_any = False
+        for uuid_ in (p.AF01_UUID, p.AF02_UUID):
+            char = services.get_characteristic(uuid_)
+            if char is None:
+                self.bus.publish("log", f"Characteristic {uuid_[4:8].upper()} not found on this device.")
+                continue
+            found_any = True
+            props = list(char.properties)
+            use_response = "write-without-response" not in props
+            self._write_response[uuid_] = use_response
+            self.bus.publish(
+                "log",
+                f"{uuid_[4:8].upper()}: {', '.join(props)} -> using "
+                f"{'write-with-response' if use_response else 'write-without-response'}",
+            )
+        if not found_any:
+            listing = "; ".join(
+                f"{s.uuid}: " + ", ".join(f"{c.uuid}[{'/'.join(c.properties)}]" for c in s.characteristics)
+                for s in services
+            )
+            self.bus.publish("log", f"ISDT service not found. Device GATT table: {listing}")
 
     async def _request(self, char_uuid: str, data: bytes, expect: str,
                        timeout: float = RESPONSE_TIMEOUT_S) -> Optional[dict]:
@@ -198,19 +231,33 @@ class BleCharger(ChargerBase):
             except Exception as e:  # noqa: BLE001
                 log.warning("MTU exchange failed: %s", e)
         await asyncio.sleep(1.0)
+        self._rx_count = 0
+        self._inspect_characteristics()
 
         await client.start_notify(p.AF01_UUID, self._on_notify)
         await asyncio.sleep(0.5)
         await client.start_notify(p.AF02_UUID, self._on_notify)
         await asyncio.sleep(0.5)
 
-        self.hw_info = await self._request(p.AF02_UUID, p.hw_info_req(), "hw_info", 3.0)
+        # Bind first, then ask for hardware info (same order as the
+        # Home Assistant integration, which is known to work with the Air8).
         bind = await self._request(p.AF02_UUID, p.bind_req(client_id()), "bind", BIND_TIMEOUT_S)
         self.bound = None if bind is None else bind["ok"]
-        if self.bound is not True:
-            self.bus.publish("log", "No bind confirmation from charger (continuing; some firmware doesn't reply).")
+        if self.bound is False:
+            self.bus.publish("log", "Charger REJECTED the bind request.")
+        elif self.bound is None:
+            self.bus.publish("log", "No bind reply from charger after "
+                                    f"{BIND_TIMEOUT_S:.0f} s (continuing; some firmware doesn't reply).")
+        self.hw_info = await self._request(p.AF02_UUID, p.hw_info_req(), "hw_info", 3.0)
         await self._write(p.AF02_UUID, p.start_stream_req())
         await asyncio.sleep(0.2)
+        if self._rx_count == 0:
+            self.bus.publish(
+                "log",
+                "WARNING: the charger has not sent ANY data since connecting. Commands are not "
+                "reaching it, or it is ignoring this client. Make sure no phone has ISDLink open, "
+                "power-cycle the charger, then reconnect. Tick 'Show raw packets' and send the log.",
+            )
 
         self.connected = True
         self._status()
@@ -238,6 +285,8 @@ class BleCharger(ChargerBase):
                 if misses == 8:
                     self.bus.publish("log", "Charger stopped answering telemetry requests.")
             except Exception as ex:  # noqa: BLE001
+                if not self.connected or not (self._client and self._client.is_connected):
+                    break
                 self.bus.publish("log", f"Poll error: {ex}")
                 await asyncio.sleep(2.0)
             await asyncio.sleep(max(0.0, POLL_PERIOD_S - (time.monotonic() - start)))
