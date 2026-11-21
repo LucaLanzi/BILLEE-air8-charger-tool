@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Air8 Charger</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>BILLEE · ISDT Air8</h1>
+  <span id="conn-badge" class="badge badge-off">Disconnected</span>
+  <span id="sim-badge" class="badge badge-sim" hidden>Simulator</span>
+</header>
+
+<div class="notice" role="note">
+  <strong>No remote stop.</strong> No Bluetooth stop command for the Air8 is known yet.
+  To stop a job, unplug the battery (main lead first, then the balance lead) or switch off the charger's power.
+  Don't leave a charge unattended.
+</div>
+
+<main class="grid">
+  <!-- ============ Connection ============ -->
+  <section class="card" id="connect-card">
+    <h2>Charger</h2>
+    <div class="row">
+      <button id="scan-btn">Scan</button>
+      <button id="disconnect-btn" class="secondary" disabled>Disconnect</button>
+    </div>
+    <ul id="device-list" class="device-list"></ul>
+    <dl id="hw-info" class="kv" hidden></dl>
+    <label class="check"><input type="checkbox" id="alarm-toggle" disabled> Alarm tone</label>
+  </section>
+
+  <!-- ============ Job ============ -->
+  <section class="card" id="job-card">
+    <h2>New job</h2>
+    <form id="job-form" autocomplete="off">
+      <fieldset class="seg" id="task-seg">
+        <legend>Mode</legend>
+        <label><input type="radio" name="task" value="charge" checked><span>Charge</span></label>
+        <label><input type="radio" name="task" value="storage"><span>Storage</span></label>
+        <label><input type="radio" name="task" value="discharge"><span>Discharge</span></label>
+        <label><input type="radio" name="task" value="destroy"><span>Destroy</span></label>
+      </fieldset>
+
+      <div class="fields">
+        <label>Chemistry
+          <select name="chemistry" id="chemistry"></select>
+        </label>
+        <label>Cells
+          <select name="cells" id="cells"></select>
+        </label>
+        <label>Pack capacity (mAh)
+          <input type="number" name="pack_mah" id="pack_mah" min="0" step="50" placeholder="e.g. 5000">
+        </label>
+        <label>C-rate
+          <input type="number" id="crate" min="0.1" max="10" step="0.1" value="1">
+        </label>
+        <label>Current (A)
+          <input type="number" name="current_a" id="current_a" min="0.1" max="20" step="0.1" value="1.0" required>
+          <small id="current-hint" class="hint"></small>
+        </label>
+        <label><span id="cutoff-label">Cut-off (V/cell)</span>
+          <input type="number" name="cutoff" id="cutoff" step="0.01" required>
+          <small id="cutoff-hint" class="hint"></small>
+        </label>
+        <label>Capacity limit (mAh, 0 = off)
+          <input type="number" name="capacity_limit_mah" id="cap_limit" min="0" step="50" value="0">
+        </label>
+      </div>
+
+      <label class="check" id="destroy-confirm-row" hidden>
+        <input type="checkbox" id="destroy-confirm"> I understand Destroy fully drains the pack for disposal.
+      </label>
+
+      <div id="job-messages" aria-live="polite"></div>
+      <details class="packet"><summary>Packet preview</summary><code id="packet-preview">-</code></details>
+
+      <div class="row">
+        <button type="submit" id="start-btn" class="primary" disabled>Start job</button>
+      </div>
+    </form>
+
+    <div class="presets">
+      <h3>Presets</h3>
+      <div class="row">
+        <select id="preset-select"><option value="">- choose preset -</option></select>
+        <button type="button" id="preset-load" class="secondary">Load</button>
+        <button type="button" id="preset-delete" class="secondary">Delete</button>
+      </div>
+      <div class="row">
+        <input type="text" id="preset-name" placeholder="Preset name (e.g. Rover 6S 22Ah)" maxlength="60">
+        <button type="button" id="preset-save" class="secondary">Save current</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Live ============ -->
+  <section class="card wide" id="live-card">
+    <h2>Live</h2>
+    <div class="tiles" id="tiles"></div>
+
+    <div class="charts">
+      <figure class="chart">
+        <figcaption>Cell voltages <span class="muted" id="cell-spread"></span></figcaption>
+        <div id="cell-chart" class="chart-body"></div>
+      </figure>
+      <figure class="chart">
+        <figcaption>Pack voltage (V)</figcaption>
+        <div id="volt-chart" class="chart-body"></div>
+      </figure>
+      <figure class="chart">
+        <figcaption>Current (A)</figcaption>
+        <div id="amp-chart" class="chart-body"></div>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============ Log ============ -->
+  <section class="card wide" id="log-card">
+    <h2>Log</h2>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="show-hex"> Show raw packets</label>
+      <button type="button" id="log-clear" class="secondary small">Clear</button>
+    </div>
+    <pre id="log" class="log"></pre>
+    <form id="raw-form" class="row" hidden>
+      <select id="raw-char"><option value="af01">AF01</option><option value="af02">AF02</option></select>
+      <input type="text" id="raw-hex" placeholder="hex bytes, e.g. 12 e4 00">
+      <button type="submit" class="secondary">Send raw</button>
+    </form>
+  </section>
+</main>
+
+<dialog id="confirm-dialog">
+  <form method="dialog">
+    <h2>Start this job?</h2>
+    <div id="confirm-body"></div>
+    <div class="row end">
+      <button value="cancel" class="secondary">Cancel</button>
+      <button value="ok" class="primary" id="confirm-ok">Start</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>

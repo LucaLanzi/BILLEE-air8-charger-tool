@@ -1,0 +1,19 @@
+{
+  "name": "billee-air8-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web UI for the BILLEE ISDT Air8 charger tool",
+  "type": "module",
+  "scripts": {
+    "start": "node start.js",
+    "sim": "node start.js --sim",
+    "frontend": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "http-proxy-middleware": "^3.0.3"
+  }
+}

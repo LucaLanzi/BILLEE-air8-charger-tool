@@ -1,0 +1,20 @@
+[project]
+name = "air8-backend"
+version = "0.1.0"
+description = "Bluetooth LE backend for controlling an ISDT Air8 charger"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.22",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.scripts]
+air8-backend = "air8_backend:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.13"]
+build-backend = "uv_build"
